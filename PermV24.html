@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>TSP Unique Loops (3–8 Points)</title>
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    textarea { width: 220px; height: 120px; margin: 5px; display: block; font-family: monospace; }
+    canvas { border: 1px solid #ccc; margin: 5px; }
+    .canvas-container { display: flex; flex-wrap: wrap; }
+
+    .indicator {
+      display: inline-flex;
+      align-items: center;
+      margin-top: 10px;
+      font-weight: bold;
+    }
+
+    .bubble {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-left: 6px;
+      border: 1px solid #333;
+      background-color: gray;
+    }
+
+    .bubble.active {
+      background-color: blue;
+    }
+
+    #polygonizationWrapper {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      width: 320px;
+      height: auto;
+      resize: both;
+      overflow: hidden;
+      display: none;
+      border: 1px solid #999;
+      background: #fff;
+      z-index: 1000;
+    }
+
+    #polygonizationHeader {
+      background: #444;
+      color: white;
+      padding: 5px 10px;
+      font-size: 14px;
+      cursor: move;
+      user-select: none;
+    }
+
+    #polygonizationCanvas {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    #polygonizationCaption {
+      padding: 5px 10px;
+      font-size: 14px;
+      background: #f9f9f9;
+      border-top: 1px solid #ccc;
+    }
+  </style>
+</head>
+<body>
+  <h2>Traveling Salesman Problem - Unique Loops (3 to 8 Points)</h2>
+  <p>Enter 3 to 8 points (one per line in <code>x,y</code> format):</p>
+  <textarea id="pointsInput" placeholder="e.g.&#10;100,100&#10;200,150&#10;250,80"></textarea>
+
+  <label><input type="checkbox" id="simpleOnly" onchange="drawTSP()"> Show only simple polygons (no crossing)</label><br>
+  <label><input type="checkbox" id="containsCentroid" onchange="drawTSP()"> Centroid must be inside polygon</label><br>
+  <label><input type="checkbox" id="showCentroid" onchange="drawTSP()" checked> Show centroid point</label><br>
+  <label><input type="checkbox" id="highlightShortest" onchange="drawTSP()"> Highlight shortest perimeter loop</label><br>
+  <label><input type="checkbox" id="showPolygonization" onchange="drawTSP()"> Show complete polygonization</label><br>
+
+  <button onclick="drawTSP()">Show TSP Loops</button>
+  <p id="status"></p>
+
+  <div class="indicator">
+    Colinear Points? <div id="colinearBubble" class="bubble"></div>
+  </div>
+
+  <div class="canvas-container" id="canvasContainer"></div>
+
+  <!-- Polygonization wrapper -->
+  <div id="polygonizationWrapper">
+    <div id="polygonizationHeader">Polygonization</div>
+    <canvas id="polygonizationCanvas" width="300" height="300"></canvas>
+    <div id="polygonizationCaption"></div>
+  </div>
+
+  <script>
+    function parsePoints() {
+      const raw = document.getElementById('pointsInput').value.trim();
+      const lines = raw.split('\n');
+      const points = [];
+
+      for (let line of lines) {
+        const [xStr, yStr] = line.split(',').map(s => s.trim());
+        const x = parseFloat(xStr);
+        const y = parseFloat(yStr);
+        if (!isNaN(x) && !isNaN(y)) {
+          points.push({ x, y });
+        }
+      }
+      return points;
+    }
+
+    function detectColinearGroups(points) {
+      const colinearPoints = new Set();
+      for (let i = 0; i < points.length; i++) {
+        for (let j = i + 1; j < points.length; j++) {
+          const a = points[i], b = points[j], group = [a, b];
+          for (let k = 0; k < points.length; k++) {
+            if (k === i || k === j) continue;
+            const c = points[k];
+            const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+            if (Math.abs(area) < 1e-10) group.push(c);
+          }
+          if (group.length >= 3) {
+            for (let pt of group) {
+              colinearPoints.add(JSON.stringify(pt));
+            }
+          }
+        }
+      }
+      return new Set([...colinearPoints].map(p => JSON.parse(p)));
+    }
+
+    function permute(arr) {
+      if (arr.length <= 1) return [arr];
+      const result = [];
+      for (let i = 0; i < arr.length; i++) {
+        const current = arr[i];
+        const remaining = arr.slice(0, i).concat(arr.slice(i + 1));
+        const perms = permute(remaining);
+        for (let p of perms) result.push([current, ...p]);
+      }
+      return result;
+    }
+
+    function isSimplePolygon(path) {
+      function segmentsIntersect(a, b, c, d) {
+        function ccw(p1, p2, p3) {
+          return (p3.y - p1.y) * (p2.x - p1.x) > (p2.y - p1.y) * (p3.x - p1.x);
+        }
+        return ccw(a, c, d) !== ccw(b, c, d) && ccw(a, b, c) !== ccw(a, b, d);
+      }
+      for (let i = 0; i < path.length - 1; i++) {
+        for (let j = i + 1; j < path.length - 1; j++) {
+          if (Math.abs(i - j) <= 1 || (i === 0 && j === path.length - 2)) continue;
+          const a = path[i], b = path[i + 1];
+          const c = path[j], d = path[j + 1];
+          if (segmentsIntersect(a, b, c, d)) return false;
+        }
+      }
+      return true;
+    }
+
+    function getCentroid(points) {
+      const x = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+      const y = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+      return { x, y };
+    }
+
+    function pointInPolygon(point, vs) {
+      let inside = false;
+      for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+        const xi = vs[i].x, yi = vs[i].y;
+        const xj = vs[j].x, yj = vs[j].y;
+        const intersect = ((yi > point.y) !== (yj > point.y)) &&
+          (point.x < (xj - xi) * (point.y - yi) / ((yj - yi) + 1e-12) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    }
+
+    function getPerimeter(path) {
+      let length = 0;
+      for (let i = 0; i < path.length - 1; i++) {
+        const dx = path[i + 1].x - path[i].x;
+        const dy = path[i + 1].y - path[i].y;
+        length += Math.hypot(dx, dy);
+      }
+      return length;
+    }
+
+    function drawPath(canvas, path, colinearSet, centroid, showCentroid, isShortest) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const margin = 20;
+      const maxX = Math.max(...path.map(p => p.x));
+      const maxY = Math.max(...path.map(p => p.y));
+      const scaleX = (canvas.width - 2 * margin) / (maxX || 1);
+      const scaleY = (canvas.height - 2 * margin) / (maxY || 1);
+
+      ctx.strokeStyle = isShortest ? 'gold' : '#333';
+      ctx.lineWidth = isShortest ? 4 : 2;
+      ctx.beginPath();
+      for (let i = 0; i < path.length; i++) {
+        const px = path[i].x * scaleX + margin;
+        const py = canvas.height - (path[i].y * scaleY + margin);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.stroke();
+
+      for (let p of path) {
+        const px = p.x * scaleX + margin;
+        const py = canvas.height - (p.y * scaleY + margin);
+        ctx.beginPath();
+        ctx.arc(px, py, 4, 0, 2 * Math.PI);
+        const isColinear = [...colinearSet].some(cp => cp.x === p.x && cp.y === p.y);
+        ctx.fillStyle = isColinear ? 'blue' : 'red';
+        ctx.fill();
+      }
+
+      if (showCentroid && centroid) {
+        const cx = centroid.x * scaleX + margin;
+        const cy = canvas.height - (centroid.y * scaleY + margin);
+        ctx.beginPath();
+        ctx.arc(cx, cy, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = 'green';
+        ctx.fill();
+      }
+    }
+
+    function drawPolygonizationCanvas(points) {
+      const canvas = document.getElementById('polygonizationCanvas');
+      const caption = document.getElementById('polygonizationCaption');
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const margin = 20;
+      const maxX = Math.max(...points.map(p => p.x));
+      const maxY = Math.max(...points.map(p => p.y));
+      const scaleX = (canvas.width - 2 * margin) / (maxX || 1);
+      const scaleY = (canvas.height - 2 * margin) / (maxY || 1);
+
+      const scaled = p => ({
+        x: p.x * scaleX + margin,
+        y: canvas.height - (p.y * scaleY + margin)
+      });
+
+      let intersections = [];
+
+      for (let i = 0; i < points.length; i++) {
+        for (let j = i + 1; j < points.length; j++) {
+          const p1 = points[i], p2 = points[j];
+          ctx.beginPath();
+          const a = scaled(p1), b = scaled(p2);
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.strokeStyle = "#aaa";
+          ctx.stroke();
+        }
+      }
+
+      for (let i = 0; i < points.length; i++) {
+        for (let j = i + 1; j < points.length; j++) {
+          for (let k = 0; k < points.length; k++) {
+            for (let l = k + 1; l < points.length; l++) {
+              if (i === k || i === l || j === k || j === l) continue;
+              const p1 = points[i], p2 = points[j];
+              const p3 = points[k], p4 = points[l];
+
+              const denom = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x);
+              if (denom === 0) continue;
+
+              const x = ((p1.x * p2.y - p1.y * p2.x)*(p3.x - p4.x) - (p1.x - p2.x)*(p3.x * p4.y - p3.y * p4.x)) / denom;
+              const y = ((p1.x * p2.y - p1.y * p2.x)*(p3.y - p4.y) - (p1.y - p2.y)*(p3.x * p4.y - p3.y * p4.x)) / denom;
+
+              const inSeg = (p, q, r) => {
+                return Math.min(p.x, q.x) <= r.x && r.x <= Math.max(p.x, q.x) &&
+                       Math.min(p.y, q.y) <= r.y && r.y <= Math.max(p.y, q.y);
+              };
+
+              const inter = { x, y };
+              if (inSeg(p1, p2, inter) && inSeg(p3, p4, inter)) {
+                intersections.push(inter);
+              }
+            }
+          }
+        }
+      }
+
+      const unique = [];
+      const seen = new Set();
+      for (let p of intersections) {
+        const key = `${p.x.toFixed(2)},${p.y.toFixed(2)}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          unique.push(p);
+        }
+      }
+
+      for (let p of unique) {
+        const s = scaled(p);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 3, 0, 2 * Math.PI);
+        ctx.fillStyle = "orange";
+        ctx.fill();
+      }
+
+      caption.textContent = `${unique.length} line intersections`;
+    }
+
+    function drawTSP() {
+      const points = parsePoints();
+      const container = document.getElementById('canvasContainer');
+      const status = document.getElementById('status');
+      const simpleOnly = document.getElementById("simpleOnly").checked;
+      const containsCentroid = document.getElementById("containsCentroid").checked;
+      const showCentroid = document.getElementById("showCentroid").checked;
+      const highlightShortest = document.getElementById("highlightShortest").checked;
+      const bubble = document.getElementById("colinearBubble");
+      const showPolygonization = document.getElementById("showPolygonization").checked;
+      const polygonWrapper = document.getElementById("polygonizationWrapper");
+
+      container.innerHTML = "";
+      status.textContent = "";
+
+      if (points.length < 3 || points.length > 8) {
+        status.textContent = "Please enter between 3 and 8 valid points.";
+        polygonWrapper.style.display = "none";
+        return;
+      }
+
+      const colinearSet = detectColinearGroups(points);
+      bubble.classList.toggle("active", colinearSet.size >= 3);
+
+      const centroid = getCentroid(points);
+      const [first, ...rest] = points;
+      const perms = permute(rest);
+      const uniqueLoops = [];
+
+      for (let p of perms) {
+        const loop = [first, ...p, first];
+        const reversed = [first, ...p.slice().reverse(), first];
+        const isDuplicate = uniqueLoops.some(existing =>
+          JSON.stringify(existing.path) === JSON.stringify(reversed)
+        );
+
+        if (!isDuplicate) {
+          const isSimple = isSimplePolygon(loop);
+          if (simpleOnly && !isSimple) continue;
+          if (containsCentroid && !pointInPolygon(centroid, loop.slice(0, -1))) continue;
+
+          const perimeter = getPerimeter(loop);
+          uniqueLoops.push({ path: loop, perimeter });
+        }
+      }
+
+      let shortest = null;
+      if (highlightShortest && uniqueLoops.length > 0) {
+        shortest = uniqueLoops.reduce((a, b) => a.perimeter < b.perimeter ? a : b);
+      }
+
+      status.textContent = `Showing ${uniqueLoops.length} unique TSP loops` +
+        (simpleOnly ? " (simple only)" : "") +
+        (containsCentroid ? " (with centroid inside)" : "") +
+        (highlightShortest ? ` — Shortest: ${shortest?.perimeter.toFixed(2)}` : "");
+
+      for (let entry of uniqueLoops) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 250;
+        canvas.height = 250;
+        const isShortest = highlightShortest && shortest && entry.perimeter === shortest.perimeter;
+        drawPath(canvas, entry.path, colinearSet, centroid, showCentroid, isShortest);
+        container.appendChild(canvas);
+      }
+
+      if (showPolygonization) {
+        polygonWrapper.style.display = "block";
+        drawPolygonizationCanvas(points);
+      } else {
+        polygonWrapper.style.display = "none";
+      }
+    }
+
+    (function () {
+      const wrapper = document.getElementById("polygonizationWrapper");
+      const header = document.getElementById("polygonizationHeader");
+      let offsetX = 0, offsetY = 0, dragging = false;
+
+      header.addEventListener("mousedown", function (e) {
+        dragging = true;
+        offsetX = e.clientX - wrapper.offsetLeft;
+        offsetY = e.clientY - wrapper.offsetTop;
+        document.addEventListener("mousemove", move);
+        document.addEventListener("mouseup", stop);
+      });
+
+      function move(e) {
+        if (dragging) {
+          wrapper.style.left = (e.clientX - offsetX) + "px";
+          wrapper.style.top = (e.clientY - offsetY) + "px";
+        }
+      }
+
+      function stop() {
+        dragging = false;
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", stop);
+      }
+    })();
+  </script>
+</body>
+</html>
